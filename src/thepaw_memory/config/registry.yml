@@ -1,0 +1,132 @@
+card_store:
+  _label: 卡片存储
+  _desc: JSONL存储和内存索引管理
+  stable_reference_threshold:
+    _label: 稳定引用阈值
+    _desc: reference_count超过此值时标记卡片为stable
+    _type: number
+    _scope: global
+    value: 10
+  max_card_tokens:
+    _label: 单卡token上限
+    _desc: 创建或更新卡片时content超过此值则拒绝
+    _type: number
+    _scope: global
+    value: 500
+card_retrieve:
+  _label: 卡片检索
+  _desc: 双轮检索：向量+关键词搜索 → 算分+门槛过滤 → 母卡链+横向邻居 → 副脑tool-call定夺
+  default_memory_count:
+    _label: 默认检索数
+    _desc: 注入上限，副脑可选 0 到此数
+    _type: number
+    _scope: global
+    value: 3
+  region_memory_count:
+    _label: 区域激活注入数
+    _desc: region_activation 每轮注入的条数上限（小结伪卡 + 补充经历卡）
+    _type: number
+    _scope: global
+    value: 5
+  score_threshold:
+    _label: 向量相似度门槛
+    _desc: 搜索结果向量相似度低于此值不进候选
+    _type: number
+    _scope: global
+    value: 0.35
+  legacy_threshold:
+    _label: Legacy卡门槛
+    _desc: legacy卡需要更高的向量相似度才能进候选
+    _type: number
+    _scope: global
+    value: 0.55
+  keyword_match_enabled:
+    _label: 关键词混合检索
+    _desc: 开启后在向量检索之外叠加keyword/tag/content子串匹配
+    _type: boolean
+    _scope: global
+    value: true
+  keyword_base_score:
+    _label: 关键词命中基础分
+    _desc: 关键词命中时赋予的基础分数，与向量分数取max
+    _type: number
+    _scope: global
+    value: 0.6
+memory_confidence:
+  _label: Round 2 副脑检索
+  _desc: 副脑文本协议审阅 Round 1 候选，可补充搜索
+  enabled:
+    _label: 启用副脑审阅
+    _desc: 开启后检索结果交给副脑 tool-call 筛选再注入主脑
+    _type: boolean
+    _scope: global
+    value: true
+  fallback_score_threshold:
+    _label: 兜底分数阈值
+    _desc: 副脑不可用时，综合分低于此值的卡片被丢弃
+    _type: number
+    _scope: global
+    value: 0.5
+  max_tokens:
+    _label: 审阅max_tokens
+    _desc: 副脑每轮 tool-call 的输出 token 上限
+    _type: number
+    _scope: global
+    value: 800
+  max_tool_rounds:
+    _label: 最大 tool-call 轮数
+    _desc: Round 2 tool-call 循环的最大轮数，超过走兜底
+    _type: number
+    _scope: global
+    value: 3
+reranker:
+  _label: MemReranker 重排序
+  _desc: 用 MemReranker-4B 对候选卡片重排序，替代副脑筛选
+  enabled:
+    _label: 启用重排序
+    _desc: 开启后用 MemReranker 替代副脑 Round 2 筛选
+    _type: boolean
+    _scope: global
+    value: false
+  model_path:
+    _label: 模型路径
+    _desc: MemReranker 本地模型路径
+    _type: text
+    _scope: global
+    value: models/MemReranker-4B
+memory_review:
+  _label: 记忆整理
+  _desc: 夜间草稿落库管线
+  idle_hours_threshold:
+    _type: number
+    _scope: global
+    value: 5
+  pending_force_threshold:
+    _type: number
+    _scope: global
+    value: 40
+  buffer_max:
+    _type: number
+    _scope: global
+    value: 5
+  staging_pool_trigger:
+    _type: number
+    _scope: global
+    value: 10
+  narrative_child_threshold:
+    _type: number
+    _scope: global
+    value: 10
+  subbrain_display_name:
+    _type: text
+    _scope: per_persona
+    value: 副脑
+heartbeat:
+  _label: 心跳系统
+  _desc: 副脑定期心跳：静默家务+随机唤醒主脑+预约机制+退避
+  dedup_cosine_threshold:
+    _label: 去重余弦阈值
+    _desc: 卡片cosine相似度超过此值视为重复
+    _type: number
+    _scope: global
+    value: 0.85

@@ -1,0 +1,18 @@
+# thepaw_memory — optional prompt/budget fallback defaults.
+#
+# Read only by utils.load_prompt_budget(), which is itself a fallback for
+# module_cfg()/is_feature_enabled(). The core retrieve/ingest/review paths read
+# registry.yml + prompts.yml via cfg() instead, so these values are rarely hit.
+# Mirrors the in-code defaults in utils.load_prompt_budget(); override as needed.
+
+model_ctx_total: 8192
+out_max: 1024
+reserve: 384
+service_prompt_soft_max: 8000
+system_base_max: 1200
+system_runtime_max: 200
+memory_total_max: 1200
+summary_max: 650
+recent_min_keep_msgs: 4
+recent_min_keep_tokens: 600
+estimator: utf8_div3

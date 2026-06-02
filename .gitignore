@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+__pycache__/
+*.py[cod]
+
+# Runtime data (per-persona stores, logs) — never commit
+data/
+*.jsonl
+*.db
+*.faiss
+
+# Virtualenvs
+.venv/
+venv/
