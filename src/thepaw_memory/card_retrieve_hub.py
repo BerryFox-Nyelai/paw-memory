@@ -1,5 +1,5 @@
 # ============================================================
-# Hub-first Retrieve — 顺着个人联想地图翻记忆 (Phase 2, 并行/实验)
+# Yelin Hub-first Retrieve — 顺着个人联想地图翻记忆 (Phase 2, 并行/实验)
 #
 # 老路 (card_retrieve.retrieve): 拿单句去撒网捞"字面/意思像"的卡。
 # 新路 (这里):
@@ -82,7 +82,7 @@ def _spread(
 
 
 def _idf_reweight(lit: Dict[str, float], graph, ncards: int) -> Dict[str, float]:
-    """通称降权：跟 query 共享一个"小美"(到处都是)远不如共享一个稀有点有信息量。
+    """通称降权：跟 query 共享一个"Alice"(到处都是)远不如共享一个稀有点有信息量。
     点的能量 × idf(df 越大权越小)。"""
     dfs = graph.node_dfs(lit.keys())
     out: Dict[str, float] = {}

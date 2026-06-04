@@ -15,3 +15,6 @@ data/
 # Virtualenvs
 .venv/
 venv/
+
+# Private extraction tooling — maps real persona names → generic examples, keep local
+sync_from_app.sh

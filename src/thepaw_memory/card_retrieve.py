@@ -1,5 +1,5 @@
 # ============================================================
-# Card Retrieve — vector search + link spreading activation
+# Yelin Card Retrieve — vector search + link spreading activation
 #
 # Replaces memory_retrieve.py for the card-based memory system.
 # Flow: vector search → spread one hop → self-layer priority → co-activation boost
@@ -436,14 +436,59 @@ def _spreading_activation(
     return above[:max_results]
 
 
-# Region retrieval tunables (summary-first → drill → word-graph spread).
-_REGION_DRILL_TOPICS = 2          # how many top topics to open for concrete cards
-_REGION_CARDS_PER_TOPIC = 2       # max concrete cards kept per drilled topic
-_REGION_NODE_SCAN = 20            # candidate cards pulled per node before ranking
-_REGION_RELEVANCE_FLOOR = 0.3     # rerank score below which a card isn't "贴"
-_REGION_SPREAD_MIN_PMI = 0.0      # partner-word PMI gate when the reranker also vets the card
-_REGION_SPREAD_MIN_PMI_NORERANK = 1.0  # higher bar when PMI is the only quality gate
-_REGION_SPREAD_MAX_DF_RATIO = 0.5 # skip hub words in >50% of carded docs when spreading
+# Region retrieval: name match (exact + suffix-variant) → entity summary 封面;
+# FTS card content (BM25) → concrete cards. No reranker, no persona/model-tuned
+# numbers — generality is structural, not calibrated.
+_REGION_FTS_PER_WORD = 3          # cards per query word from FTS, BM25-ranked
+_REGION_RARE_NAME_GF = 100        # below this general-corpus word frequency an entity
+                                  # name counts as "rare/specific" and may be matched
+                                  # by raw substring (segmentation-free). 遛狗=3 sits
+                                  # here; the nearest generic junk name 记得=2545 is
+                                  # ~25x above — the cut is a gap, not a tuned knob.
+_REGION_ASSOC_MAX = 2             # 联想路径每轮最多带几个相关词条的摘要
+_REGION_ASSOC_MIN_PMI = 1.0       # 联想 PMI 门槛：只跳够强的共现(语料内部信号，不绑模型)
+
+# Search-side tokenizer — keep only nouns/proper-nouns (jieba POS), minus a standard
+# Chinese stopword list + digits. This is what makes "你好 / 帮我写python / 我今天好累"
+# resolve to empty: the chit-chat words aren't nouns. A general resource (746-word
+# stopword list + POS), not tuned to any persona.
+_STOPWORDS: Optional[Set[str]] = None
+
+
+def _stopwords() -> Set[str]:
+    global _STOPWORDS
+    if _STOPWORDS is None:
+        import os
+        path = os.path.join(os.path.dirname(__file__), "cn_stopwords.txt")
+        try:
+            with open(path, encoding="utf-8") as f:
+                _STOPWORDS = {ln.strip() for ln in f if ln.strip()}
+        except Exception as e:
+            _log("stopwords_load_error", str(e)[:120])
+            _STOPWORDS = set()
+    return _STOPWORDS
+
+
+def _search_tokens(query: str) -> List[str]:
+    """Pull the locatable words out of a turn: nouns / proper nouns / English /
+    abbreviations only (jieba POS), minus stopwords and digits. Verbs, particles
+    and interjections (你好 / 帮 / 写 / 累) drop out, so chit-chat tokenizes to
+    nothing and the region channel injects nothing."""
+    import jieba.posseg as pseg
+    sw = _stopwords()
+    out: List[str] = []
+    seen: Set[str] = set()
+    for w, flag in pseg.cut(query or ""):
+        w = w.strip().lower()
+        if not w or w.isdigit() or w in sw or w in seen:
+            continue
+        # 名词 + 动名词(vn:训练/设计/研究)+ 形名词(an)+ 英文/简称。动名词是名词性
+        # 内容词,必须留——否则"训练/分析"这类话题词被当动词丢掉、连经历卡都搜不到。
+        # 纯动词/形容词/语气词(帮/写/累/吧)仍被剔,闲聊照样抠不出词。
+        if flag[0] == "n" or flag in ("vn", "an", "eng", "j"):
+            seen.add(w)
+            out.append(w)
+    return out
 
 
 def region_activation(
@@ -484,181 +529,140 @@ def _region_card(store: CardStore, cid: str, exclude: Set[str]) -> Optional[Dict
     return c
 
 
-def _drill_topic(
-    node: str,
-    query: str,
-    graph,
-    store: CardStore,
-    exclude: Set[str],
-    reranker_on: bool,
-) -> List[Dict[str, Any]]:
-    """Open one topic: pick the 1-2 cards under ``node`` most relevant to ``query``.
-
-    If the reranker can score them, keep those clearing the relevance floor.
-    If nothing clears it — or the reranker is unavailable — fall back to the
-    single latest card (option B): a topic the user just raised always hands
-    back at least one concrete memory.
-    """
-    cand_ids = graph.cards_for_node(node, limit=_REGION_NODE_SCAN)
-    cands = [c for cid in cand_ids if (c := _region_card(store, cid, exclude))]
-    if not cands:
-        return []
-    # cands are recency-desc (cards_for_node order), so cands[0] is the latest.
-    if reranker_on:
-        from thepaw_memory.reranker import rerank as _rerank
-        ranked = _rerank(query, cands, top_k=_REGION_CARDS_PER_TOPIC)
-        scored = [c for c in ranked if "_rerank_score" in c]
-        if scored:
-            kept = [c for c in scored if c["_rerank_score"] >= _REGION_RELEVANCE_FLOOR]
-            if kept:
-                return kept[:_REGION_CARDS_PER_TOPIC]
-    return cands[:1]
-
-
-def _spread_one(
-    topic_node: str,
-    query: str,
-    graph,
-    store: CardStore,
-    exclude: Set[str],
-    chosen_ids: Set[str],
-    reranker_on: bool,
-) -> Optional[Dict[str, Any]]:
-    """Word-graph association: from ``topic_node`` hop one step to a genuine
-    co-occurrence partner (PMI-gated, hub words skipped) and bring back its
-    latest card.
-
-    Quality comes from PMI vouching for the partner word. When the reranker is
-    available it adds a second, card-level gate (the card must also clear the
-    relevance floor); without it, PMI alone carries the bar, so we raise it.
-    Either way we never 硬塞: no qualifying partner, no card.
-    """
-    min_pmi = _REGION_SPREAD_MIN_PMI if reranker_on else _REGION_SPREAD_MIN_PMI_NORERANK
-    partners = graph.strong_partners(
-        topic_node,
-        top_k=3,
-        min_pmi=min_pmi,
-        max_df_ratio=_REGION_SPREAD_MAX_DF_RATIO,
-    )
-    _rerank = None
-    if reranker_on:
-        from thepaw_memory.reranker import rerank as _rerank
-    for pnode, _pmi in partners:
-        for cid in graph.cards_for_node(pnode, limit=5):
-            if cid in chosen_ids:
-                continue
-            card = _region_card(store, cid, exclude)
-            if not card:
-                continue
-            if reranker_on:
-                ranked = _rerank(query, [card], top_k=1)
-                scored = [c for c in ranked if "_rerank_score" in c]
-                if scored and scored[0]["_rerank_score"] >= _REGION_RELEVANCE_FLOOR:
-                    return scored[0]
-                break  # this partner's latest didn't pass; try the next partner
-            # PMI already vouched for the partner word — take its latest card.
-            return card
-    return None
-
-
 def _select_region_cards(
     query: str,
     persona_id: str,
     session_id: str = "",
 ) -> List[Dict[str, Any]]:
-    """Summary-first topic retrieval over the dictionary map.
+    """Always-on region retrieval — literal, zero-LLM, fully general.
 
-    1. Extract keywords from the turn (jieba, no LLM).
-    2. Give the summary of every mentioned topic that has one (the "封面" layer)
-       — nothing the user raised goes unknown. Bounded by the keyword cap.
-    3. Drill the top 1-2 topics for 1-2 concrete cards each (see _drill_topic).
-    4. Spread one step along the word graph for an associated card (_spread_one).
-    5. Fill any leftover budget with threshold-gated flat retrieval, so non-
-       summarized topics still surface — and an empty pool injects nothing.
+    Work out which entity/topic the turn names, then hand back its summary (封面)
+    plus the most on-point concrete cards. Names are matched two ways, because
+    jieba segmentation alone is a single point of failure:
 
-    Summaries and concrete cards share one budget (region_memory_count),
-    summaries first. ``session_id`` cards already injected are excluded.
+      (a) noun token == entity name — the precise path (handles common-word topics
+          strictly so dirty generic "names" 记得/而是/方式 aren't amplified).
+      (b) a *rare* entity name appearing literally in the raw turn (substring,
+          segmentation-free). Rarity (general-corpus gf < _REGION_RARE_NAME_GF)
+          restricts this to specific/coined entities (遛狗/Alice/Sam/lora…), so a
+          literal hit is a real reference and jieba can't hide it — "今天遛狗了吗"
+          merges 遛狗 into a verb and the noun filter drops it, yet the substring
+          still matches. English/abbr names need a whole-token hit so short ones
+          (ai/web/api) don't fire inside unrelated words.
+      (c) suffix-variant: a token is the tail of a compound name (蛇 → Boa). Only
+          this direction; the reverse surfaced junk (聊聊天 → 聊天) so it's dropped.
+
+    Cards come from FTS over card text (BM25), per matched name and per leftover
+    token. One budget (region_memory_count), summaries first, already-injected
+    cards dropped (draw-without-replacement). Nothing matched → inject nothing
+    (宁缺毋滥). Which of two same-named entities / literal-vs-metaphor it is — that
+    is reading comprehension, left to the main brain.
     """
-    from thepaw_memory.memory_query import extract_keywords
-    from thepaw_memory.memory_graph import get_graph
+    from thepaw_memory.memory_graph import get_graph, general_word_freq
     from thepaw_memory.datastore import injected_card_ids_for_session
 
-    kws = extract_keywords(query, persona_id, top_k=5)
-    if not kws:
+    toks = _search_tokens(query)
+    graph = get_graph(persona_id)
+    names = graph.summary_names()                    # names only — content fetched later
+    name_set = set(names)
+
+    # — which entity names does the turn mention? (ordered, de-duplicated) —
+    matched: List[str] = []
+    seen: Set[str] = set()
+
+    def _mark(n: str) -> None:
+        if n not in seen:
+            seen.add(n)
+            matched.append(n)
+
+    tset = set(toks)
+    for t in toks:                                  # (a) exact: noun token == name
+        if t in name_set:
+            _mark(t)
+    ql = query.lower()                              # (b) rare name, raw substring
+    for n in names:
+        if n in seen or len(n) < 2 or general_word_freq(n) >= _REGION_RARE_NAME_GF:
+            continue
+        if n.isascii():
+            if n in tset:        # english/abbr: whole-token only
+                _mark(n)
+        elif n in ql:
+            _mark(n)
+    for t in toks:                                  # (c) token is tail of a name
+        for n in names:
+            if n not in seen and n != t and n.endswith(t):
+                _mark(n)
+
+    # 联想路径：从命中的词条/话题词顺词典地图跳到强共现的*别的有摘要词条*。让"训练"这种
+    # 没自己摘要的话题词，也能把 lora/语料/rlhf 这些相关词条的摘要带出来。PMI 卡门槛(语料
+    # 内部信号、不绑模型)，只跳有摘要的真词条(prune 后干净)；残留少量低频垃圾词条(think)。
+    assoc: List[str] = []
+    assoc_cand: List[Tuple[str, float]] = []
+    for w in toks:   # 只用原始抠词做种子，别用变体/子串派生的名字(否则伙伴被污染)
+        for p, pmi in graph.strong_partners(w, top_k=5, min_pmi=_REGION_ASSOC_MIN_PMI):
+            if p in name_set and p not in seen:
+                assoc_cand.append((p, pmi))
+    assoc_cand.sort(key=lambda x: x[1], reverse=True)
+    for p, _pmi in assoc_cand:
+        if len(assoc) >= _REGION_ASSOC_MAX:
+            break
+        if p in seen:
+            continue
+        seen.add(p)
+        assoc.append(p)
+
+    if not matched and not assoc and not toks:
         return []
 
     budget = cfg("card_retrieve.region_memory_count", persona_id) or 5
     store = get_store(persona_id)
     exclude: Set[str] = injected_card_ids_for_session(session_id) if session_id else set()
-    reranker_on = bool(cfg("reranker.enabled"))
 
-    result_cards: List[Dict[str, Any]] = []
-    chosen_ids: Set[str] = set()
+    result: List[Dict[str, Any]] = []
+    chosen: Set[str] = set()
 
-    graph = get_graph(persona_id)
-
-    # Step 2 — summaries for every mentioned topic, in keyword order. No gate
-    # needed: a summary only exists if the node cleared cohesion at write time,
-    # so scattered/meta words never have one. Skip ones already injected.
-    summary_map = graph.summaries_for_nodes(kws)
-    summary_nodes = [k for k in kws if summary_map.get(k)]  # preserve kw priority
-    for node_name in summary_nodes:
-        if len(result_cards) >= budget:
+    # 摘要在前：先直接命中的词条，再联想带出的相关词条；经历卡在后。
+    contents = graph.summary_contents(matched + assoc)
+    for n in matched + assoc:
+        if len(result) >= budget:
             break
-        if f"summary_{node_name}" in exclude:
+        content = contents.get(n)
+        if not content:
             continue
-        result_cards.append({
-            "id": f"summary_{node_name}",
-            "content": f"[{node_name}] {summary_map[node_name]}",
+        sid = f"summary_{n}"
+        if sid in exclude or sid in chosen:
+            continue
+        chosen.add(sid)
+        result.append({
+            "id": sid,
+            "content": f"[{n}] {content}",
             "level": -1,
-            "source": "summary",
+            "source": "summary_assoc" if n in assoc else "summary",
             "is_summary": True,
         })
 
-    # Step 3 — drill the top topics that had a summary.
-    drilled_topics: List[str] = []
-    for node_name in summary_nodes[:_REGION_DRILL_TOPICS]:
-        if len(result_cards) >= budget:
+    # concrete cards — FTS each matched name + each leftover token, BM25-ranked via
+    # the store's public search_fts. cards_fts also indexes superseded/archived cards,
+    # so over-fetch a window and keep the top few that still resolve to a live card
+    # (_region_card drops the rest).
+    fts_terms = matched + [t for t in toks if t not in seen]
+    fts_window = max(_REGION_FTS_PER_WORD * 6, 20)
+    for term in fts_terms:
+        if len(result) >= budget:
             break
-        for card in _drill_topic(node_name, query, graph, store, exclude, reranker_on):
-            if len(result_cards) >= budget:
+        kept = 0
+        for cid in store.search_fts(term, limit=fts_window, ranked=True):
+            if len(result) >= budget or kept >= _REGION_FTS_PER_WORD:
                 break
-            if card["id"] in chosen_ids:
+            if cid in chosen:
                 continue
-            result_cards.append(card)
-            chosen_ids.add(card["id"])
-            if node_name not in drilled_topics:
-                drilled_topics.append(node_name)
+            card = _region_card(store, cid, exclude)
+            if card:
+                chosen.add(cid)
+                result.append(card)
+                kept += 1
 
-    # Step 4 — one quality-gated word-graph hop from the top drilled topic.
-    # Runs with or without the reranker; PMI is the baseline quality gate.
-    if drilled_topics and len(result_cards) < budget:
-        spread = _spread_one(
-            drilled_topics[0], query, graph, store, exclude, chosen_ids, reranker_on
-        )
-        if spread:
-            result_cards.append(spread)
-            chosen_ids.add(spread["id"])
-
-    # Step 5 — threshold-gated flat retrieval fills leftover budget (catches
-    # non-summarized topics). retrieve()'s cosine gate keeps this from 硬捞.
-    remaining = budget - len(result_cards)
-    if remaining > 0:
-        fallback = retrieve(
-            queries=[" ".join(kws)],
-            persona_id=persona_id,
-            memory_count=remaining,
-            exclude_ids=exclude | chosen_ids,
-        )
-        for card in fallback.get("cards", []):
-            if len(result_cards) >= budget:
-                break
-            if card.get("id") in chosen_ids:
-                continue
-            result_cards.append(card)
-            chosen_ids.add(card.get("id"))
-
-    return result_cards[:budget]
+    return result[:budget]
 
 
 # ============================================================

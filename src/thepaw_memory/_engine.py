@@ -126,3 +126,27 @@ class MemoryEngine:
         """Low-level card store for manual add / list / delete."""
         from thepaw_memory.card_store import get_store
         return get_store(persona_id)
+
+    # ------------------------------------------------------------ MIGRATION
+    def migrate(self, persona_id: str) -> Dict[str, int]:
+        """One-time upgrade cleanup — run once per persona after upgrading.
+
+        Re-runs the current summary gate over existing 摘要 and drops the ones it
+        would no longer write, clearing the generic-word 摘要 (方式/看到/…) left by
+        the old cohesion gate. Idempotent (safe to run repeatedly), only touches
+        this persona's data, and removes nothing the gate still accepts. Portraits,
+        cards and the subject change need no migration — they upgrade on read/next
+        review automatically.
+        """
+        from thepaw_memory.memory_graph import get_graph
+        graph = get_graph(persona_id)
+        rows = graph._conn.execute(
+            "SELECT node_name FROM summaries WHERE content != ''"
+        ).fetchall()
+        stale = [n for (n,) in rows if not graph._summary_axis(n)]
+        if stale:
+            graph._conn.executemany(
+                "DELETE FROM summaries WHERE node_name = ?", [(n,) for n in stale]
+            )
+            graph._conn.commit()
+        return {"pruned": len(stale), "kept": len(rows) - len(stale)}

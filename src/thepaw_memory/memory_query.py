@@ -1,5 +1,5 @@
 # ============================================================
-# Memory Query — 自己抠词 + 地图扩写 (query construction layer)
+# Yelin Memory Query — 自己抠词 + 地图扩写 (query construction layer)
 #
 # 不靠主脑吐 [recall] 关键词：从用户的话里**自己**抠出检索词，再顺着个人联想
 # 地图把词补全，交给现有的 card_retrieve.retrieve() 排序。
@@ -39,7 +39,7 @@ def _ensure_vocab(persona_id: str) -> None:
 
 
 def extract_keywords(text: str, persona_id: str, top_k: int = 5) -> List[str]:
-    """从一段话里自己抠检索词。优先认地图上已知的实体(小美/mo…)，
+    """从一段话里自己抠检索词。优先认地图上已知的实体(Alice/Rex…)，
     且越稀有(df 越小)越靠前——稀有词更能定位，通称("模型""对话")往后排。"""
     text = (text or "").strip()
     if not text:
@@ -82,11 +82,11 @@ def expand_keywords(
     pool: int = 80,
 ) -> List[str]:
     """把抠出的词顺着地图补全。三道闸夹出"特异且扎实"的关联词：
-      - 源头闸：只从"有定位力"的词往外联想——小美/小红这种霸占半库的通称
+      - 源头闸：只从"有定位力"的词往外联想——Alice/Cleo这种霸占半库的通称
         (df≥max_df_a_frac·全库)谁都沾，从它出发只能得噪声，直接不联想。
       - 频率闸：共现≥min_weight 且 邻居本身 df≥min_df_b(排掉一次性碎词)。
       - 关联闸：按 PMI×log(共现) 排——PMI 衡量"比偶然多撞上多少"(通称
-        小红/小明跟谁都≈0、出局)，×log(共现) 偏向证据多的(别被稀有碎词刷分)。
+        Cleo/Bob跟谁都≈0、出局)，×log(共现) 偏向证据多的(别被稀有碎词刷分)。
     只回**新增**的扩写词(不含原词)。"""
     graph = get_graph(persona_id)
     N = max(1, graph.stats().get("carded", 1))

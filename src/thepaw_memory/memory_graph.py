@@ -1,5 +1,5 @@
 # ============================================================
-# Co-occurrence Graph — 个人联想地图 (shadow, Phase 1)
+# Yelin Co-occurrence Graph — 个人联想地图 (shadow, Phase 1)
 #
 # 每张记忆卡落库时，抽出它的节点(实体/关键词/内容显著词)，把同卡内的节点两两
 # 连边、权重累加。这就是"谁老跟谁一起出现"的关联地图 —— 记忆里那张静态的网。
@@ -43,7 +43,7 @@ _MIN_LEN = 2                # 节点最短长度(单字噪音多，丢)
 _CONTENT_TOPK = 12         # 每张卡从 content 抽几个 TF-IDF 显著词
 _MAX_NODES_PER_CARD = 16   # 单卡节点封顶，防 all-pairs 边数爆炸
 
-# 复合 subject/keyword 拆成多个实体：「小美、小明」→ 小美 + 小明。
+# 复合 subject/keyword 拆成多个实体：「Alice、Bob」→ Alice + Bob。
 # 只切标点/空白(安全)，不切"和/与/跟"(怕劈开"和解""参与"这类词)。
 _SPLIT_RE = re.compile(r"[、，,；;/／|｜&＆+＋\s]+")
 
@@ -57,8 +57,46 @@ def _split(raw: str) -> List[str]:
     return [p for p in _SPLIT_RE.split(raw or "") if p]
 
 
+# 英文虚词：jieba 是中文词典，me/she/her/so 在通用词频里查无(gf=0)，会被名字轴误当
+# "生造名字"。单列一张表直接剔。
+_EN_STOP: Set[str] = {
+    "the", "a", "an", "i", "me", "my", "mine", "you", "your", "yours",
+    "he", "him", "his", "she", "her", "hers", "it", "its",
+    "we", "us", "our", "ours", "they", "them", "their", "theirs",
+    "is", "am", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "have", "has", "had",
+    "and", "or", "but", "so", "as", "of", "to", "in", "on", "at",
+    "by", "for", "with", "from", "this", "that", "these", "those",
+    "not", "no", "yes", "if", "then", "than", "too", "very", "just",
+}
+
+# 词条配不配摘要：通用词频低于此 = 够生僻 = 特定名字的词条(人/宠物/地点/自造词)。
+# 阈值落在真词条(男朋友 326 封顶)和通用废词(记得 2545 起跳)之间那道宽沟里，不敏感；
+# gf 来自通用词典，对所有 persona 一样、不看本地经历卡多少。
+_SUMMARY_NAME_MAX_GF = 500
+
+# 通用语料词频参照(判"是不是生造名字"用)。必须独立 pristine 分词器：全局 jieba 被
+# seed_vocab/add_word 喂过实体名，FREQ 已污染，拿它查会把实体误当常用词。
+_gen_tok = None
+
+
+def _gen_tokenizer():
+    global _gen_tok
+    if _gen_tok is None:
+        t = jieba.Tokenizer()
+        t.initialize()
+        _gen_tok = t
+    return _gen_tok
+
+
+def general_word_freq(word: str) -> int:
+    """通用语料词频(0 = 查无 = 生造/极生僻)。公开入口，给"这是常用词还是特定名字"
+    这个判断复用——别去 import 私有的 _gen_tokenizer 抓 FREQ。"""
+    return _gen_tokenizer().FREQ.get(word, 0)
+
+
 def seed_vocab(names: Iterable[str]) -> None:
-    """把已知实体名喂进 jieba 词典 —— content 分词时名字(小美/小明…)不被切碎，
+    """把已知实体名喂进 jieba 词典 —— content 分词时名字(Alice/Bob…)不被切碎，
     才连得出"谁和谁"的边(认人地基)。idempotent，live 路径也可随时补。"""
     for n in names:
         n = _norm(n)
@@ -410,50 +448,16 @@ class CooccurrenceGraph:
             )
             self._conn.commit()
 
-    def card_cohesion(self, node: str, max_cards: int = 40) -> float:
-        """How tightly clustered are the cards under this node?
-
-        High cohesion (>0.55) = cards are about the same thing = real entity/topic.
-        Low cohesion (<0.55) = cards are about many different things = generic word.
-        Returns average pairwise cosine similarity of the node's card embeddings.
-        """
-        import numpy as np
-        node = _norm(node)
-        rows = self._conn.execute(
-            "SELECT card_id FROM card_nodes WHERE node = ? ORDER BY rowid DESC LIMIT ?",
-            (node, max_cards),
-        ).fetchall()
-        if len(rows) < 3:
-            return 1.0  # too few cards to judge, assume OK
-
-        from thepaw_memory.card_store import get_store
-        from thepaw_memory.embeddings import encode
-        active = {c["id"]: c for c in get_store(self.persona_id).all_active()}
-        texts = [active[r[0]].get("content", "")[:300]
-                 for r in rows if r[0] in active]
-        if len(texts) < 3:
-            return 1.0
-
-        vecs = encode(texts)
-        norms = vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9)
-        sim = norms @ norms.T
-        n = len(texts)
-        return float((sim.sum() - n) / (n * (n - 1)))
-
     def nodes_needing_summary(
-        self, min_df: int = 5, min_new: int = 3, min_cohesion: float = 0.54,
+        self, min_df: int = 5, min_new: int = 3,
     ) -> List[Tuple[str, int, int]]:
         """Find nodes that deserve a summary and have new cards since last write.
 
-        A node qualifies if:
-        1. df >= min_df (thick enough)
-        2. card_cohesion >= min_cohesion (cards are about this topic, not scattered)
-        3. Either no summary yet, or new_since_write >= min_new (needs rewrite)
-
-        The cohesion check separates real topics (球球 0.58, 记忆系统 0.56)
-        from generic words (对话 0.51, 小明 0.50) by measuring whether
-        the cards under a node are about the same thing.
+        够厚(df>=min_df) + 自上次写后有新卡 + 过摘要门控(见 _summary_axis)：
+        词条够生僻(通用词频低)=特定名字才写摘要。通用常用词(方式/训练/对话)不写——
+        它的经历卡照样能被搜到。冒号碎片/英文虚词/纯数字直接剔。
         """
+        self._prune_orphan_summaries()
         rows = self._conn.execute(
             "SELECT n.name, n.df, COALESCE(s.new_since_write, n.df) as new_count "
             "FROM nodes n LEFT JOIN summaries s ON n.name = s.node_name "
@@ -463,20 +467,70 @@ class CooccurrenceGraph:
         ).fetchall()
         result = []
         for name, df, new_count in rows:
-            cohesion = self.card_cohesion(name)
-            if cohesion >= min_cohesion:
+            if self._summary_axis(name):
                 result.append((name, df, new_count))
             else:
-                # Persist an empty marker so a generic node isn't re-encoded
-                # every night. new_since_write resets to 0; record_card bumps it
-                # again, so cohesion is only re-checked after min_new fresh cards.
-                self.save_summary(name, "", df)
-                _log("cohesion_skip", f"node={name} df={df} cohesion={cohesion:.3f}")
+                cur = self._conn.execute(
+                    "SELECT content FROM summaries WHERE node_name = ?", (name,)
+                ).fetchone()
+                if cur and (cur[0] or "").strip():
+                    # 已有真摘要却判跳(门控以后变严才会出现)：绝不静默抹掉它——
+                    # 只清 new_since_write 止住每晚重选，内容留给显式 prune 决定。
+                    with self._lock:
+                        self._conn.execute(
+                            "UPDATE summaries SET new_since_write = 0 WHERE node_name = ?",
+                            (name,),
+                        )
+                        self._conn.commit()
+                    _log("summary_kept_despite_skip", f"node={name} df={df}")
+                else:
+                    # 通用词/碎片且本就没内容：写空壳标记，避免每晚重判。
+                    self.save_summary(name, "", df)
+                    _log("summary_skip", f"node={name} df={df}")
         return result
 
-    def summaries_for_nodes(self, node_names: List[str]) -> Dict[str, str]:
-        """Get summaries for a list of nodes. Returns {node_name: content} for nodes that have summaries."""
-        names = [_norm(n) for n in node_names if _norm(n)]
+    def _summary_axis(self, name: str) -> str:
+        """词条配不配摘要：返回 '名字' = 该写，'' = 跳过。
+
+        判据只剩一条——通用词频够低 = 够生僻 = 特定名字的词条(人/宠物/地点/自造词)。
+        砍掉了原来的"聚拢轴"(看经历卡聚不聚)：它既放通用词进来(方式碰巧聚拢)、又误杀
+        横跨多场景的真词条(遛狗)，还绑 embedder。常用词当话题的不写摘要，靠经历卡。"""
+        if "：" in name or ":" in name:
+            return ""                       # 字段:值 元数据碎片
+        if name.lower() in _EN_STOP:
+            return ""                       # 英文虚词
+        if re.fullmatch(r"[0-9.]+", name):
+            return ""                       # 纯数字
+        if general_word_freq(name) < _SUMMARY_NAME_MAX_GF:
+            return "名字"                   # 通用语料里够生僻 = 特定名字的词条
+        return ""
+
+    def _prune_orphan_summaries(self) -> None:
+        """清掉孤儿总结行：卡被超写/删除后图会全量重建(clear→回填 nodes)，但 summaries 不在
+        重建范围内，于是留下"节点已不存在、总结还在"的孤儿。不清的话，一提到该词检索就会注入
+        一条来源已不存在的旧总结。"""
+        with self._lock:
+            if self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 0:
+                return  # 图空(可能正在重建)，不动 summaries，避免误删全部
+            n = self._conn.execute(
+                "DELETE FROM summaries WHERE node_name NOT IN (SELECT name FROM nodes)"
+            ).rowcount
+            self._conn.commit()
+        if n:
+            _log("summary_orphan_pruned", f"n={n}")
+
+    def summary_names(self) -> List[str]:
+        """Node names that have a written summary — names only, cheap. The retriever
+        matches a turn against these, then pulls content for the few that hit
+        (summary_contents), instead of dragging every summary's text in each turn."""
+        rows = self._conn.execute(
+            "SELECT node_name FROM summaries WHERE content != ''"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def summary_contents(self, names: List[str]) -> Dict[str, str]:
+        """Summary text for the given node names: {node_name: content}."""
+        names = [n for n in names if n]
         if not names:
             return {}
         qmarks = ",".join("?" * len(names))

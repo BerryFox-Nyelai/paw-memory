@@ -13,6 +13,13 @@ card_store:
     _type: number
     _scope: global
     value: 500
+
+  max_portrait_tokens:
+    _label: 画像卡token上限
+    _desc: 画像卡(is_portrait)天生长，用单独的高上限；prompt 目标3000字，此为硬上限
+    _type: number
+    _scope: global
+    value: 5000
 card_retrieve:
   _label: 卡片检索
   _desc: 双轮检索：向量+关键词搜索 → 算分+门槛过滤 → 母卡链+横向邻居 → 副脑tool-call定夺

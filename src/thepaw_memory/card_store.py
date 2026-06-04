@@ -1,5 +1,5 @@
 # ============================================================
-# Card Store — unified memory card storage
+# Yelin Card Store — unified memory card storage
 #
 # SQLite (WAL) per persona + in-memory index + FTS5 search.
 # All memory types (event/self/understanding) share one schema.
@@ -38,8 +38,9 @@ class CardTooLargeError(ValueError):
     pass
 
 
-def _check_token_cap(content: str) -> None:
-    cap = cfg("card_store.max_card_tokens")
+def _check_token_cap(content: str, is_portrait: bool = False) -> None:
+    # 画像卡天生长(长期+中期理解),用单独的高上限；普通经历卡仍受 350字级的 cap 约束。
+    cap = cfg("card_store.max_portrait_tokens") if is_portrait else cfg("card_store.max_card_tokens")
     tokens = estimate_tokens(content)
     if tokens > cap:
         raise CardTooLargeError(
@@ -310,7 +311,7 @@ class CardStore:
     # --- Write ---
 
     def append(self, card: Dict[str, Any]) -> Dict[str, Any]:
-        _check_token_cap(card.get("content", ""))
+        _check_token_cap(card.get("content", ""), bool(card.get("is_portrait")))
 
         card_id = card.get("id")
         if not card_id:
@@ -329,7 +330,8 @@ class CardStore:
 
     def update(self, card_id: str, **fields) -> Optional[Dict[str, Any]]:
         if "content" in fields:
-            _check_token_cap(fields["content"])
+            _is_p = bool(fields.get("is_portrait") or (self._cards.get(card_id) or {}).get("is_portrait"))
+            _check_token_cap(fields["content"], _is_p)
 
         with self._lock:
             card = self._cards.get(card_id)
@@ -568,7 +570,8 @@ class CardStore:
         with self._lock:
             for card_id, fields in updates:
                 if "content" in fields:
-                    _check_token_cap(fields["content"])
+                    _is_p = bool(fields.get("is_portrait") or (self._cards.get(card_id) or {}).get("is_portrait"))
+                    _check_token_cap(fields["content"], _is_p)
                 card = self._cards.get(card_id)
                 if not card:
                     continue
@@ -616,18 +619,23 @@ class CardStore:
 
     # --- Search ---
 
-    def search_fts(self, query: str) -> List[str]:
-        """FTS5 search. Returns matching card IDs."""
+    def search_fts(self, query: str, *, limit: int = 0, ranked: bool = False) -> List[str]:
+        """FTS5 search → matching card IDs. ``ranked=True`` orders by BM25 relevance
+        (best first); ``limit > 0`` caps the rows returned."""
         if not query:
             return []
         tok = _fts_tokenize(query)
         if not tok.strip():
             return []
+        sql = "SELECT card_id FROM cards_fts WHERE cards_fts MATCH ? AND card_id IS NOT NULL"
+        params: tuple = (tok,)
+        if ranked:
+            sql += " ORDER BY rank"
+        if limit > 0:
+            sql += " LIMIT ?"
+            params = (tok, limit)
         try:
-            rows = self._conn.execute(
-                "SELECT card_id FROM cards_fts WHERE cards_fts MATCH ? AND card_id IS NOT NULL",
-                (tok,),
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
             return [r[0] for r in rows if r[0]]
         except Exception as e:
             report_error("warning", "card_store.search_fts", e, f"query={query[:50]}")

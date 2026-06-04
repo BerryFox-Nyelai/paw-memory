@@ -1,5 +1,5 @@
 # ============================================================
-# Memory Engine — unified card write layer
+# Yelin Memory Engine — unified card write layer
 #
 # All card creation goes through engine.ingest().
 # ============================================================

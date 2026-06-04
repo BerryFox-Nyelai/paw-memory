@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "the-paw-memory"
-version = "0.1.1"
+version = "0.2.0"
 description = "A self-contained, card-based long-term memory engine for chat backends."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,8 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Vector retrieval + summary cohesion gating. Without these, only the
-# store/graph layers work; retrieve() needs an embedding backend.
+# Vector search for retrieve()'s flat fallback. The region path and the summary
+# gate are now pure-literal (no embedder) — region retrieval works without these;
+# only retrieve()'s vector search needs them.
 vectors = [
     "faiss-cpu>=1.7",
     "sentence-transformers>=2.2",
@@ -30,4 +31,4 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-thepaw_memory = ["config/*.yml"]
+thepaw_memory = ["config/*.yml", "*.txt"]
