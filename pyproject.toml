@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "the-paw-memory"
-version = "0.2.0"
+version = "0.2.1"
 description = "A self-contained, card-based long-term memory engine for chat backends."
 readme = "README.md"
 requires-python = ">=3.10"

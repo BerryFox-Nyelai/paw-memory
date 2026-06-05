@@ -38,7 +38,7 @@ async def harvest_evicted(
         _log("skip_empty")
         return None
 
-    result = await _main_brain_harvest(persona_id, messages)
+    result = await _main_brain_harvest(persona_id, messages, session_id=session_id)
     if not result or not result.get("events"):
         _log("no_events")
         return None
@@ -112,6 +112,7 @@ def _time_period() -> str:
 async def _main_brain_harvest(
     persona_id: str,
     evicted_messages: List[Dict[str, Any]],
+    session_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Single main-brain call on evicted messages: extract events + rate + reflect + correct."""
     from thepaw_memory.core.entity import get_persona_name
@@ -149,6 +150,7 @@ async def _main_brain_harvest(
     raw_text = await main_brain_call(
         persona_id, harvest_messages,
         max_tokens=4000, temperature=0.3,
+        session_id=session_id,
     )
     if not raw_text:
         _log("harvest_call_empty", "main brain returned no text")
@@ -229,7 +231,11 @@ async def _apply_corrections(
             if card.get("is_portrait"):
                 continue
             content = card.get("content", "")
-            if len(original) > 10 and original[:60] in content:
+            # >=4 (was >10): the parser accepts any non-empty `original`, but the old
+            # >10 floor silently dropped valid short corrections (e.g. a 5-char fact).
+            # 4 chars stays specific enough for the substring match, and a correction
+            # only appends to edit_history (non-destructive), so a loose match is low-harm.
+            if len(original) >= 4 and original[:60] in content:
                 target = card
                 break
 

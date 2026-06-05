@@ -561,9 +561,9 @@ def _select_region_cards(
     from thepaw_memory.memory_graph import get_graph, general_word_freq
     from thepaw_memory.datastore import injected_card_ids_for_session
 
-    toks = _search_tokens(query)
+    toks = _search_tokens(query or "")
     graph = get_graph(persona_id)
-    names = graph.summary_names()                    # names only — content fetched later
+    names = [n for n in graph.summary_names() if n]  # guard against None entries
     name_set = set(names)
 
     # — which entity names does the turn mention? (ordered, de-duplicated) —

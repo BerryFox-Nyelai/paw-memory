@@ -205,12 +205,13 @@ class NightlyReview:
             session_id=self._session_id,
             user_text=review_prompt,
         )
-        from thepaw_memory.main_brain import call as main_brain_call
+        from thepaw_memory.main_brain import call_raw
         max_tok = kwargs.pop("max_tokens", 1500)
         temp = kwargs.pop("temperature", 0.7)
-        return await main_brain_call(
+        return await call_raw(
             self.persona_id, messages,
             max_tokens=max_tok, temperature=temp,
+            session_id=self._session_id,
         )
 
     # ------------------------------------------------------------------
@@ -259,6 +260,12 @@ class NightlyReview:
         from datetime import datetime, timezone
         now_str = now_iso()
         now_dt = datetime.fromisoformat(now_str)
+        # Force tz-aware (mirrors `base` below). If the runtime ever resolves now_iso's
+        # %z to empty (UTC container / stripped TZ), now_dt would be naive and the
+        # `now_dt - base` subtract throws — swallowed by the caller, silently killing
+        # ALL retention decay. Normalizing here makes decay tz-independent.
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
         updates = []
         zeroed = 0
         for card in store.all_active():
@@ -333,6 +340,11 @@ class NightlyReview:
                 continue
 
             recent_buffer = list(portrait.get("recent_buffer") or [])
+            # Idempotent by date: a crash-window re-run of the same day's review must
+            # not append a SECOND entry for `today` (the trigger's reviewed flag is
+            # only persisted at end-of-tick, so a mid-tick failure can re-enter and
+            # re-run review). Replace any existing same-day entry instead of stacking.
+            recent_buffer = [e for e in recent_buffer if e.get("date") != today]
             recent_buffer.append({"date": today, "summary": summary_for_type})
 
             staging_pool = list(portrait.get("staging_pool") or [])
@@ -407,7 +419,10 @@ class NightlyReview:
             return self._parse_portrait_split(text)
         except Exception as e:
             _log("portrait_split_error", str(e)[:200])
-            return {pt: daily_summary for pt in PORTRAIT_TYPES}
+            # Skip (match the empty-parse path) rather than fan the whole
+            # undifferentiated daily summary into all three portrait buffers, which
+            # would cross-contaminate them. The next clean run catches up.
+            return {}
 
     @staticmethod
     def _parse_portrait_split(text: str) -> Dict[str, str]:
